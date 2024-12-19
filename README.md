@@ -42,17 +42,6 @@ _Design Patterns_
 2. Dependency Injection
    ...
 
-## Implementations
-
-### Data pipeline
-
-1. How to analyze the syntax of source files
-   Use tree-sitter
-
-### Synthetic Data Generation
-
-### Evaluation
-
 ## Tech stack
 
 | **Category**                       | **Tools/Technologies**                                                                                                     |
