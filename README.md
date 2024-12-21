@@ -67,3 +67,15 @@ For implementation, we follow:
 
 -   [Replit’s LLM Training Blog](https://blog.replit.com/llm-training)
 -   [Replit’s Code Repair Blog](https://blog.replit.com/code-repair)
+-   [Agents for Software Development and Web Browsing (Graham Neubig)](https://phontron.com/class/anlp-fall2024/assets/slides/anlp-16-softwarewebagents.pdf)
+
+## Notes
+
+LLM-based Localization is a very interesting problem
+
+-   Finding the correct files given user intent
+-   **I will focus on an unsolved issue: when to perform RAG in agent**
+-   Use GraphRAG when user intent requires multiple pieces of information, as it can handle multi-hop queries efficiently
+-   Use PageRank to prioritize which nodes (i.e., files or functions) to explore
+-   A high PageRank score indicates that an existing knowledge graph may suffice to generate accurate responses without external retrieval.
+    This is because entities with high PageRank scores are typically well-connected and central to the structure of the knowledge graph.
