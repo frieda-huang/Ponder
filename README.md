@@ -79,3 +79,13 @@ LLM-based Localization is a very interesting problem
 -   Use PageRank to prioritize which nodes (i.e., files or functions) to explore
 -   A high PageRank score indicates that an existing knowledge graph may suffice to generate accurate responses without external retrieval.
     This is because entities with high PageRank scores are typically well-connected and central to the structure of the knowledge graph.
+
+## Implemenation
+
+Objective: Fine-tune DeepSeek-Coder-V2-Instruct to retrieve the most relevant code snippets for a user query
+
+-   Build a codebase graph to identify relationships between files, functions, classes, and dependencies
+-   Generate synthetic user queries related to code functionality
+-   Use PageRank scores to rank the most relevant code snippets for each query
+-   Extract additional context for each snippet
+-   Use PageRank scores during training to help determine code importance and during inference to help decide retrieval strategy (direct vs GraphRAG)
