@@ -89,3 +89,4 @@ Objective: Fine-tune DeepSeek-Coder-V2-Instruct to retrieve the most relevant co
 -   Use PageRank scores to rank the most relevant code snippets for each query
 -   Extract additional context for each snippet
 -   Use PageRank scores during training to help determine code importance and during inference to help decide retrieval strategy (direct vs GraphRAG)
+    -   Nodes are source files and the edges are the references between methods/classes in the source files
