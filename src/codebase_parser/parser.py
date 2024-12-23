@@ -2,19 +2,17 @@ from pathlib import Path
 from typing import Generator, List
 
 import networkx as nx
-import tree_sitter_python as tspython
 from codebase_parser.ast_graph_builder import ASTGraphBuilder
 from rich import print
-from tree_sitter import Language, Node, Parser, Tree
-
-PY_LANGUAGE = Language(tspython.language())
+from src.commons import PY_LANGUAGE, ASTMapping
+from tree_sitter import Node, Parser, Tree
 
 
 class CodebaseParser:
     def __init__(self, directory: str):
         self.directory = directory
         self.parser = Parser(PY_LANGUAGE)
-        self.ast_tree = {}
+        self.ast_tree: ASTMapping = {}
         self.graph = nx.MultiDiGraph()
 
     def get_python_filepaths(self) -> List[Path]:
@@ -49,7 +47,7 @@ class CodebaseParser:
                 break
 
     def build_graph(
-        self, ast_tree: dict, ast_graph_builder: ASTGraphBuilder
+        self, ast_tree: ASTMapping, ast_graph_builder: ASTGraphBuilder
     ) -> nx.MultiDiGraph:
         """Build a graph from the AST."""
         return ast_graph_builder.build_graph_from_ast(ast_tree)
