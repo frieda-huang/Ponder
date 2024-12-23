@@ -1,26 +1,22 @@
 # Based on https://tree-sitter.github.io/tree-sitter/code-navigation-systems?ref=blog.lancedb.com#tagging-and-captures
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 
-class TagRole(str, Enum):
+class TagRole(StrEnum):
     """Represents the role of an entity in the code."""
 
     DEFINITION = "definition"
     REFERENCE = "reference"
 
-    def __str__(self) -> str:
-        return self.value
 
-
-class TagKind(str, Enum):
+class TagKind(StrEnum):
     """Represents the kind of entity in the code."""
 
     CLASS = "class"
     FUNCTION = "function"
-    METHOD = "method"
     CALL = "call"
 
 
