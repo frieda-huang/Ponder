@@ -3,7 +3,7 @@ from typing import Generator, List
 
 import networkx as nx
 import tree_sitter_python as tspython
-from code_parser.ast_graph_builder import ASTGraphBuilder
+from codebase_parser.ast_graph_builder import ASTGraphBuilder
 from rich import print
 from tree_sitter import Language, Node, Parser, Tree
 
@@ -21,11 +21,12 @@ class CodebaseParser:
         """Get all Python filepaths in the codebase."""
         return [filepath for filepath in Path(self.directory).rglob("*.py")]
 
-    def parse(self) -> None:
+    def parse(self) -> dict:
         """Parse all relevant files and store the results in a dictionary."""
         for filepath in self.get_python_filepaths():
             tree = self._parse_file(filepath)
             self.ast_tree[str(filepath)] = tree
+        return self.ast_tree
 
     def print_tree(self, tree: Tree) -> Generator[Node, None, None]:
         """
