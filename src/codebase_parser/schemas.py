@@ -36,7 +36,7 @@ class Tag(BaseModel):
     name: str = Field(..., description="Name of the identified entity")
     role: TagRole = Field(..., description="Role of the entity (definition/reference)")
     kind: TagKind = Field(..., description="Kind of the entity")
-    line: int = Field(
+    start_line: int = Field(
         ..., description="The line where the identifier is defined or referenced"
     )
     rel_filename: str = Field(..., description="Relative path to the source file")
