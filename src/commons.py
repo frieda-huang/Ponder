@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Dict, TypeAlias, Union
 
 import tree_sitter_python as tspython
-from tree_sitter import Language, Tree
+from tree_sitter import Language, Parser, Tree
 
 # Custom types
 # ============================================================
@@ -12,6 +12,7 @@ ASTMapping: TypeAlias = Dict[FilepathType, Tree]
 # Tree-sitter
 # ============================================================
 PY_LANGUAGE = Language(tspython.language())
+parser = Parser(PY_LANGUAGE)
 
 # Project Paths
 # ============================================================
