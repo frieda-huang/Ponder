@@ -41,6 +41,3 @@ class Tag(BaseModel):
     )
     rel_filename: str = Field(..., description="Relative path to the source file")
     abs_filename: str = Field(..., description="Full path to the source file")
-
-
-print(TagRole.DEFINITION)
