@@ -13,7 +13,6 @@ class CodebaseParser:
         self.directory = directory
         self.parser = Parser(PY_LANGUAGE)
         self.ast_tree: ASTMapping = {}
-        self.graph = nx.MultiDiGraph()
 
     def get_python_filepaths(self) -> List[Path]:
         """Get all Python filepaths in the codebase."""

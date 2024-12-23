@@ -10,18 +10,23 @@ from tree_sitter import Tree
 
 class ASTGraphBuilder:
     def __init__(self) -> None:
-        self.tags: List[Tag] = []
+        self.graph = nx.MultiDiGraph()
 
-    def build_tags(self, ast_tree: ASTMapping) -> List[Tag]:
+    def build_graph_from_ast(self, ast_tree: ASTMapping) -> nx.MultiDiGraph:
+        tags = self._build_tags(ast_tree)
+        return self.build_graph_from_tags(tags)
+
+    def build_graph_from_tags(self, tags: List[Tag]) -> nx.MultiDiGraph:
+        pass
+
+    def _build_tags(self, ast_tree: ASTMapping) -> List[Tag]:
         """Build tags for all ASTs in the codebase."""
+        all_tags: List[Tag] = []
         for filepath, tree in ast_tree.items():
             logger.info(f"Building tags for {filepath}")
             tags = list(self._build_tag(filepath, tree))
-            self.tags.extend(tags)
-        return self.tags
-
-    def build_graph_from_ast(self, ast_tree: ASTMapping) -> nx.MultiDiGraph:
-        pass
+            all_tags.extend(tags)
+        return all_tags
 
     def _get_role(self, capture_name: str) -> Optional[TagRole]:
         """Get the role of an entity in the code.
