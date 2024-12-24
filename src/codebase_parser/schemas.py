@@ -1,7 +1,9 @@
 # Based on https://tree-sitter.github.io/tree-sitter/code-navigation-systems?ref=blog.lancedb.com#tagging-and-captures
 
 from enum import StrEnum
+from typing import List
 
+from commons import FilepathType
 from pydantic import BaseModel, Field
 
 
@@ -37,3 +39,24 @@ class Tag(BaseModel):
     )
     rel_filename: str = Field(..., description="Relative path to the source file")
     abs_filename: str = Field(..., description="Full path to the source file")
+
+
+class Define(BaseModel):
+    """Track which files define a specific identifier"""
+
+    identifier: str
+    filepath: FilepathType
+
+
+class Reference(BaseModel):
+    """Track which files reference a specific identifier"""
+
+    identifier: str
+    filepaths: List[FilepathType]
+
+
+class EntityRelationship(BaseModel):
+    """Connect a define to its reference"""
+
+    define: Define
+    reference: Reference
