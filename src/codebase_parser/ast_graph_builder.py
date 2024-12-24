@@ -1,8 +1,9 @@
 import os
-from typing import Generator, List, Optional
+from collections import defaultdict
+from typing import Generator, List, Optional, Tuple
 
 import networkx as nx
-from codebase_parser.schemas import Tag, TagKind, TagRole
+from codebase_parser.schemas import Define, Reference, Tag, TagKind, TagRole
 from commons import PY_LANGUAGE, ASTMapping, FilepathType, project_paths
 from loguru import logger
 from tree_sitter import Tree
@@ -11,22 +12,53 @@ from tree_sitter import Tree
 class ASTGraphBuilder:
     def __init__(self) -> None:
         self.graph = nx.MultiDiGraph()
+        self.tags: List[Tag] = []
 
     def build_graph_from_ast(self, ast_tree: ASTMapping) -> nx.MultiDiGraph:
-        tags = self._build_tags(ast_tree)
-        return self.build_graph_from_tags(tags)
+        self._build_tags(ast_tree)
+        return self.build_graph_from_tags()
 
-    def build_graph_from_tags(self, tags: List[Tag]) -> nx.MultiDiGraph:
-        pass
+    def build_graph_from_tags(self) -> nx.MultiDiGraph:
+        defines, references = self._process_tags()
+
+    def _build_defines(self) -> List[Define]:
+        """Build defines from the list of tags."""
+        return [
+            Define(identifier=tag.name, filepath=tag.rel_filename)
+            for tag in self.tags
+            if tag.role == TagRole.DEFINITION
+        ]
+
+    def _build_references(self) -> List[Reference]:
+        """
+        Build references from the list of tags.
+
+        Example:
+            >>> references = _build_references(tags)
+            >>> print(references)
+            [Reference(identifier='name', filepaths=['file1.py', 'file2.py'])]
+        """
+        references_tracker = defaultdict(list)
+
+        for tag in (t for t in self.tags if t.role == TagRole.REFERENCE):
+            references_tracker[tag.name].append(tag.rel_filename)
+
+        return [
+            Reference(identifier=identifier, filepaths=filepaths)
+            for identifier, filepaths in references_tracker.items()
+        ]
+
+    def _process_tags(self) -> Tuple[List[Define], List[Reference]]:
+        """Separate defines and references from the list of tags."""
+        return self._build_defines(), self._build_references()
 
     def _build_tags(self, ast_tree: ASTMapping) -> List[Tag]:
         """Build tags for all ASTs in the codebase."""
-        all_tags: List[Tag] = []
         for filepath, tree in ast_tree.items():
             logger.info(f"Building tags for {filepath}")
             tags = list(self._build_tag(filepath, tree))
-            all_tags.extend(tags)
-        return all_tags
+            self.tags.extend(tags)
+        return self.tags
 
     def _get_role(self, capture_name: str) -> Optional[TagRole]:
         """Get the role of an entity in the code.
