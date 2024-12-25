@@ -41,17 +41,25 @@ class Tag(BaseModel):
     abs_filename: str = Field(..., description="Full path to the source file")
 
 
-class Define(BaseModel):
+class IdentifierBase:
+    identifier: str
+
+    def __hash__(self) -> int:
+        return hash(self.identifier)
+
+    def __eq__(self, __o: object) -> bool:
+        return self.identifier == __o.identifier
+
+
+class Define(IdentifierBase, BaseModel):
     """Track which files define a specific identifier"""
 
-    identifier: str
     filepath: FilepathType
 
 
-class Reference(BaseModel):
+class Reference(IdentifierBase, BaseModel):
     """Track which files reference a specific identifier"""
 
-    identifier: str
     filepaths: List[FilepathType]
 
 
