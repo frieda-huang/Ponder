@@ -1,8 +1,10 @@
 import os
 from collections import defaultdict
-from typing import Generator, List, Optional, Tuple
+from itertools import product
+from typing import Counter, Generator, List, Optional, Tuple
 
 import networkx as nx
+from codebase_parser.personalization import WeightConfig
 from codebase_parser.schemas import Define, Reference, Tag, TagKind, TagRole
 from commons import PY_LANGUAGE, ASTMapping, FilepathType, project_paths
 from loguru import logger
@@ -19,7 +21,50 @@ class ASTGraphBuilder:
         return self.build_graph_from_tags()
 
     def build_graph_from_tags(self) -> nx.MultiDiGraph:
+        """Build a graph from the tags."""
         defines, references = self._process_tags()
+        common_identifiers = [obj.identifier for obj in set(defines) & set(references)]
+
+        for identifier in common_identifiers:
+            defs = [d for d in defines if d.identifier == identifier]
+            refs = [r for r in references if r.identifier == identifier]
+
+            assert len(defs) == len(refs)
+
+            for define, reference in product(defs, refs):
+                filepath_counts = Counter(reference.filepaths)
+
+                weight = self._calculate_edge_weight(reference, define)
+
+                # Each edge represents a unique reference instance of the identifier
+                for _, count in filepath_counts.items():
+                    self.graph.add_edge(
+                        reference, define, weight=weight * count, identifier=identifier
+                    )
+
+    def _calculate_edge_weight(self, reference: Reference, define: Define):
+        """Calculate the weight of an edge between a reference and a define based on the identifier type."""
+
+        if self._is_cross_file_references(reference, define):
+            return WeightConfig.cross_file_reference
+
+        if define.identifier.startswith("_"):
+            return WeightConfig.private_identifier
+
+        return WeightConfig.normal_weight
+
+    def _is_cross_file_references(self, reference: Reference, define: Define) -> bool:
+        """Check if a reference is cross-file."""
+
+        # Check if reference spans multiple files
+        multi_file_reference = len(set(reference.filepaths)) > 1
+
+        # Check if reference is in a different file from definition
+        different_file_reference = any(
+            filepath != define.filepath for filepath in reference.filepaths
+        )
+
+        return multi_file_reference or different_file_reference
 
     def _build_defines(self) -> List[Define]:
         """Build defines from the list of tags."""
