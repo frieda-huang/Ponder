@@ -68,3 +68,7 @@ class EntityRelationship(BaseModel):
 
     define: Define
     reference: Reference
+    rank: float
+
+    def __lt__(self, __o: object) -> bool:
+        return self.rank < __o.rank
