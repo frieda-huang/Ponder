@@ -50,7 +50,7 @@ class ASTGraphBuilder:
                     self.graph.add_edge(
                         reference,
                         define,
-                        weight=math.sqrt(weight) * count,
+                        weight=weight * math.sqrt(count),
                         identifier=identifier,
                     )
 
