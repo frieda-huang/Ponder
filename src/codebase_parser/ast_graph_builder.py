@@ -1,11 +1,20 @@
+import math
 import os
 from collections import defaultdict
 from itertools import product
 from typing import Counter, Generator, List, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import networkx as nx
 from codebase_parser.personalization import WeightConfig
-from codebase_parser.schemas import Define, Reference, Tag, TagKind, TagRole
+from codebase_parser.schemas import (
+    Define,
+    EntityRelationship,
+    Reference,
+    Tag,
+    TagKind,
+    TagRole,
+)
 from commons import PY_LANGUAGE, ASTMapping, FilepathType, project_paths
 from loguru import logger
 from tree_sitter import Tree
@@ -39,8 +48,44 @@ class ASTGraphBuilder:
                 # Each edge represents a unique reference instance of the identifier
                 for _, count in filepath_counts.items():
                     self.graph.add_edge(
-                        reference, define, weight=weight * count, identifier=identifier
+                        reference,
+                        define,
+                        weight=math.sqrt(weight) * count,
+                        identifier=identifier,
                     )
+
+        return self.graph
+
+    def _distribute_ranks(self) -> List[EntityRelationship]:
+        """Distribute a source file's PageRank across its outgoing edges proportionally."""
+        ranked = nx.pagerank(self.graph, weight="weight")
+
+        # Precompute total weights for each source node
+        total_weights = {
+            src: sum(
+                data["weight"] for _, _, data in self.graph.out_edges(src, data=True)
+            )
+            for src in self.graph.nodes
+        }
+
+        return sorted(
+            [
+                EntityRelationship(
+                    define=define,
+                    reference=reference,
+                    identifier=data["identifier"],
+                    rank=ranked[src] * data["weight"] / total_weights[src],
+                )
+                for src in self.graph.nodes
+                for reference, define, data in self.graph.out_edges(src, data=True)
+            ],
+            reverse=True,
+        )
+
+    def visualize_graph(self):
+        """Visualize the constructed graph using matplotlib."""
+        nx.draw(self.graph, with_labels=True)
+        plt.show()
 
     def _calculate_edge_weight(self, reference: Reference, define: Define):
         """Calculate the weight of an edge between a reference and a define based on the identifier type."""
