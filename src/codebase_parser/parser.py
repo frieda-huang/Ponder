@@ -16,7 +16,11 @@ class CodebaseParser:
 
     def get_python_filepaths(self) -> List[Path]:
         """Get all Python filepaths in the codebase."""
-        return [filepath for filepath in Path(self.directory).rglob("*.py")]
+        return [
+            filepath
+            for filepath in Path(self.directory).rglob("*.py")
+            if self.is_valid_python_file(filepath)
+        ]
 
     def parse(self) -> dict:
         """Parse all relevant files and store the results in a dictionary."""
@@ -24,6 +28,46 @@ class CodebaseParser:
             tree = self._parse_file(filepath)
             self.ast_tree[str(filepath)] = tree
         return self.ast_tree
+
+    def is_valid_python_file(self, filepath: Path) -> bool:
+        """Comprehensive validation for Python files."""
+        # Exclude virtual environment directories
+        excluded_dirs = [
+            ".venv",
+            "venv",
+            "env",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".git",
+            ".github",
+            "node_modules",
+            "build",
+            "dist",
+        ]
+
+        # Check against excluded directories
+        path_parts = filepath.parts
+        if any(excluded in path_parts for excluded in excluded_dirs):
+            return False
+
+        # Ignore hidden files/directories
+        if any(part.startswith(".") for part in path_parts):
+            return False
+
+        # Additional file validation
+        if not filepath.is_file():
+            return False
+
+        # Ensure it's a Python file
+        if filepath.suffix != ".py":
+            return False
+
+        # Skip empty files
+        if filepath.stat().st_size == 0:
+            return False
+
+        return True
 
     def print_tree(self, tree: Tree) -> Generator[Node, None, None]:
         """
