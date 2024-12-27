@@ -84,20 +84,26 @@ class ASTGraphBuilder:
             for src in self.graph.nodes
         }
 
+        def create_relationship(src, reference, define, data):
+            return EntityRelationship(
+                define=define,
+                reference=reference,
+                identifier=data["identifier"],
+                rank=ranked[src] * data["weight"] / total_weights[src],
+            )
+
         # Normalize the distribution of a source file's rank
-        return sorted(
-            [
-                EntityRelationship(
-                    define=define,
-                    reference=reference,
-                    identifier=data["identifier"],
-                    rank=ranked[src] * data["weight"] / total_weights[src],
-                )
-                for src in self.graph.nodes
-                for reference, define, data in self.graph.out_edges(src, data=True)
-            ],
-            reverse=True,
-        )
+        relationships = {
+            (
+                getattr(define, "identifier", "Unknown"),
+                getattr(reference, "identifier", "Unknown"),
+                tuple(sorted(getattr(reference, "filepaths", []))),
+            ): create_relationship(src, reference, define, data)
+            for src in self.graph.nodes
+            for reference, define, data in self.graph.out_edges(src, data=True)
+        }
+
+        return sorted(relationships.values(), reverse=True)
 
     def visualize_graph(self):
         """Visualize the constructed graph using matplotlib."""
