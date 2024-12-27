@@ -38,8 +38,6 @@ class ASTGraphBuilder:
             defs = [d for d in defines if d.identifier == identifier]
             refs = [r for r in references if r.identifier == identifier]
 
-            assert len(defs) == len(refs)
-
             for define, reference in product(defs, refs):
                 filepath_counts = Counter(reference.filepaths)
 
@@ -57,7 +55,25 @@ class ASTGraphBuilder:
         return self.graph
 
     def _distribute_ranks(self) -> List[EntityRelationship]:
-        """Distribute a source file's PageRank across its outgoing edges proportionally."""
+        """Distribute a source file's PageRank across its outgoing edges proportionally.
+
+        Example:
+            # Source file: main.py with PageRank 0.5
+            # Outgoing edges:
+
+            G.add_edge('main.py', 'user_service.py', weight=3, identifier='create_user')
+            G.add_edge('main.py', 'utils.py', weight=1, identifier='log_action')
+
+            # Calculate total outgoing edge weight
+            total_weight = 3 + 1 = 4
+
+            # Rank distribution for each edge
+            # First edge (to user_service.py)
+            data["rank"] = 0.5 * (3/4) = 0.375
+
+            # Second edge (to utils.py)
+            data["rank"] = 0.5 * (1/4) = 0.125
+        """
         ranked = nx.pagerank(self.graph, weight="weight")
 
         # Precompute total weights for each source node
@@ -68,6 +84,7 @@ class ASTGraphBuilder:
             for src in self.graph.nodes
         }
 
+        # Normalize the distribution of a source file's rank
         return sorted(
             [
                 EntityRelationship(
