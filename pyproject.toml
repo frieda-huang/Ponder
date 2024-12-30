@@ -14,4 +14,7 @@ dependencies = [
     "tree-sitter-python>=0.23.6",
     "loguru>=0.7.3",
     "scipy>=1.14.1",
+    "sentencepiece>=0.2.0",
+    "transformers>=4.47.1",
+    "torch>=2.5.1",
 ]
