@@ -1,5 +1,6 @@
 # Based on https://github.com/rasbt/LLMs-from-scratch/blob/main/ch04/01_main-chapter-code/ch04.ipynb
 
+import token
 import torch
 import torch.nn as nn
 from commons import project_paths
@@ -185,29 +186,57 @@ class GPTModel(nn.Module):
 # ---------------------------------------------------------------
 tokenizer = ReplitLMTokenizer(vocab_file=str(project_paths.VOCAB_FILE))
 
-code_str1 = """
+code_str = """
 class Calculator:
     def __init__(self, numbers):
         self.numbers = numbers
+
+    def sum(self):
+        return sum(self.numbers)
 """
 
-code_str2 = """
-def sum(self):
-    return sum(self.numbers)
-"""
+# Train and test splits
+data = torch.tensor(tokenizer.encode(code_str), dtype=torch.long)
+n = int(0.9 * len(data))  # first 90% will be train, rest val
+train_data = data[:n]
+val_data = data[n:]
 
-tensors = [
-    torch.tensor(tokenizer.encode(code_str1)),
-    torch.tensor(tokenizer.encode(code_str2)),
-]
-batch = pad_sequence(tensors, batch_first=True, padding_value=0)
-print("Padded batch shape:", batch.shape)
+block_size = GPT_CONFIG_124M["context_length"]
+batch_size = 16
+learning_rate = 1e-3
+max_iters = 5000
+eval_interval = 100
+eval_iters = 200
+
+
+# data loading
+def get_batch(split):
+    # generate a small batch of data of inputs x and targets y
+    data = train_data if split == "train" else val_data
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([data[i : i + block_size] for i in ix])
+    y = torch.stack([data[i + 1 : i + block_size + 1] for i in ix])
+    return x, y
+
+
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ["train", "val"]:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            logits, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
 
 # ---------------------------------------------------------------
 torch.manual_seed(123)
 model = GPTModel(GPT_CONFIG_124M)
 
-out = model(batch)
-print("Input batch:\n", batch)
-print("\nOutput shape:", out.shape)
-print(out)
+total_params = sum(p.numel() for p in model.parameters())
+print(total_params)
