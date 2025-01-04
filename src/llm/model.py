@@ -1,41 +1,19 @@
 # Based on https://github.com/rasbt/LLMs-from-scratch/blob/main/ch04/01_main-chapter-code/ch04.ipynb
 
-from ast import mod
-import token
 
 import torch
 import torch.nn as nn
-from commons import project_paths
-from llm.tokenizer import ReplitLMTokenizer
+from llm.config import GPTConfig
 from torch.nn import functional as F
-from torch.nn.utils.rnn import pad_sequence
-
-
-class GELU(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        return (
-            0.5
-            * x
-            * (
-                1
-                + torch.tanh(
-                    torch.sqrt(torch.tensor(2.0 / torch.pi))
-                    * (x + 0.044715 * torch.pow(x, 3))
-                )
-            )
-        )
 
 
 class FeedForward(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg: GPTConfig):
         super().__init__()
         self.layers = nn.Sequential(
-            nn.Linear(cfg["emb_dim"], 4 * cfg["emb_dim"]),
-            GELU(),
-            nn.Linear(4 * cfg["emb_dim"], cfg["emb_dim"]),
+            nn.Linear(cfg.emb_dim, 4 * cfg.emb_dim),
+            nn.GELU(),
+            nn.Linear(4 * cfg.emb_dim, cfg.emb_dim),
         )
 
     def forward(self, x):
@@ -103,20 +81,20 @@ class MultiHeadAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg: GPTConfig):
         super().__init__()
         self.att = MultiHeadAttention(
-            d_in=cfg["emb_dim"],
-            d_out=cfg["emb_dim"],
-            context_length=cfg["context_length"],
-            num_heads=cfg["n_heads"],
-            dropout=cfg["drop_rate"],
-            qkv_bias=cfg["qkv_bias"],
+            d_in=cfg.emb_dim,
+            d_out=cfg.emb_dim,
+            context_length=cfg.context_length,
+            num_heads=cfg.n_heads,
+            dropout=cfg.dropout,
+            qkv_bias=cfg.qkv_bias,
         )
         self.ff = FeedForward(cfg)
-        self.norm1 = LayerNorm(cfg["emb_dim"])
-        self.norm2 = LayerNorm(cfg["emb_dim"])
-        self.drop_shortcut = nn.Dropout(cfg["drop_rate"])
+        self.norm1 = LayerNorm(cfg.emb_dim)
+        self.norm2 = LayerNorm(cfg.emb_dim)
+        self.drop_shortcut = nn.Dropout(cfg.dropout)
 
     def forward(self, x):
         # Shortcut connection for attention block
@@ -151,18 +129,18 @@ class LayerNorm(nn.Module):
 
 
 class GPTModel(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg: GPTConfig):
         super().__init__()
-        self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
-        self.pos_emb = nn.Embedding(cfg["context_length"], cfg["emb_dim"])
-        self.drop_emb = nn.Dropout(cfg["drop_rate"])
+        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.emb_dim)
+        self.pos_emb = nn.Embedding(cfg.context_length, cfg.emb_dim)
+        self.drop_emb = nn.Dropout(cfg.dropout)
 
         self.trf_blocks = nn.Sequential(
-            *[TransformerBlock(cfg) for _ in range(cfg["n_layers"])]
+            *[TransformerBlock(cfg) for _ in range(cfg.n_layers)]
         )
 
-        self.final_norm = LayerNorm(cfg["emb_dim"])
-        self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
+        self.final_norm = LayerNorm(cfg.emb_dim)
+        self.out_head = nn.Linear(cfg.emb_dim, cfg.vocab_size, bias=False)
 
     def forward(self, in_idx, targets=None):
         batch_size, seq_len = in_idx.shape
@@ -186,111 +164,18 @@ class GPTModel(nn.Module):
         return logits, loss
 
     def generate(self, idx, max_new_tokens):
-        # idx is (B, T) array of indices in the current context
+        # Idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
-            # crop idx to the last block_size tokens
+            # Crop idx to the last block_size tokens
             idx_cond = idx[:, -block_size:]
-            # get the predictions
+            # Get the predictions
             logits, loss = self(idx_cond)
-            # focus only on the last time step
-            logits = logits[:, -1, :]  # becomes (B, C)
-            # apply softmax to get probabilities
+            # Focus only on the last time step
+            logits = logits[:, -1, :]  # Becomes (B, C)
+            # Apply softmax to get probabilities
             probs = F.softmax(logits, dim=-1)  # (B, C)
-            # sample from the distribution
+            # Sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
-            # append sampled index to the running sequence
+            # Append sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
         return idx
-
-
-# ---------------------------------------------------------------
-tokenizer = ReplitLMTokenizer(vocab_file=str(project_paths.VOCAB_FILE))
-
-
-GPT_CONFIG_124M = {
-    "vocab_size": tokenizer.vocab_size,  # Vocabulary size
-    "context_length": 1024,  # Context length
-    "emb_dim": 768,  # Embedding dimension
-    "n_heads": 12,  # Number of attention heads
-    "n_layers": 12,  # Number of layers
-    "drop_rate": 0.1,  # Dropout rate
-    "qkv_bias": False,  # Query-Key-Value bias
-}
-
-
-filepath = project_paths.SRC / "llm" / "tokenizer.py"
-with open(filepath, "r", encoding="utf-8") as f:
-    code_str = f.read()
-
-# Train and test splits
-data = torch.tensor(tokenizer.encode(code_str), dtype=torch.long)
-n = int(0.9 * len(data))  # first 90% will be train, rest val
-train_data = data[:n]
-val_data = data[n:]
-device = torch.device("mps")
-
-block_size = 32
-batch_size = 16
-learning_rate = 1e-3
-max_iters = 100
-eval_interval = 100
-eval_iters = 200
-
-
-# data loading
-def get_batch(split):
-    # generate a small batch of data of inputs x and targets y
-    data = train_data if split == "train" else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i : i + block_size] for i in ix])
-    y = torch.stack([data[i + 1 : i + block_size + 1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x, y
-
-
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in ["train", "val"]:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
-            logits, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
-
-
-# ---------------------------------------------------------------
-torch.manual_seed(123)
-model = GPTModel(GPT_CONFIG_124M).to(device)
-
-total_params = sum(p.numel() for p in model.parameters())
-print(f"total params: {total_params}")
-
-# create a PyTorch optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
-for iter in range(max_iters):
-
-    # every once in a while evaluate the loss on train and val sets
-    if iter % eval_interval == 0 or iter == max_iters - 1:
-        losses = estimate_loss()
-        print(
-            f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
-        )
-
-    # sample a batch of data
-    xb, yb = get_batch("train")
-
-    # evaluate the loss
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
-
-# generate from the model
-context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(tokenizer.decode(model.generate(context, max_new_tokens=2000)[0].tolist()))
