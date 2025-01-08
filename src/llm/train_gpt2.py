@@ -2,10 +2,10 @@ import math
 from dataclasses import dataclass
 
 import torch
-from torch.mps import is_available
 import torch.nn as nn
 from torch.nn import functional as F
 import tiktoken
+import time
 
 
 # --------------- GPT2 Implementation ---------------
@@ -265,20 +265,31 @@ if torch.mps.is_available():
     torch.mps.manual_seed(1337)
 
 
-train_loader = DataLoaderLite(B=4, T=32)
+train_loader = DataLoaderLite(B=8, T=1024)
+torch.set_float32_matmul_precision("high")
+
 model = GPT(GPTConfig())
 model.to(device)
+model = torch.compile(model, backend="aot_eager")
 
 # optimize!
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
+    t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    print(f"step {i}, loss: {loss.item()}")
+    torch.mps.synchronize()
+    t1 = time.time()
+    dt = (t1 - t0) * 1000
+    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    print(
+        f"step {i}, loss: {loss.item()}, dt: {dt:.2f} ms, tok/sec: {tokens_per_sec:.2f}"
+    )
 
 
 import sys
