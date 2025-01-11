@@ -21,6 +21,7 @@ SRC_ROOT = Path(__file__).parent
 
 class ProjectPaths:
     SRC = Path(__file__).parent
+    DATA = SRC.parent / "data"
     QUERIES = SRC / "queries"
     VOCAB_FILE = SRC / "llm" / "spiece.model"
 
