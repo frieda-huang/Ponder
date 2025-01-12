@@ -8,6 +8,7 @@ import torch
 from pydantic import BaseModel
 from rich import print
 from src.commons import project_paths
+from torch.optim import AdamW
 from torch.utils.data import DataLoader, RandomSampler, TensorDataset
 from tqdm import tqdm
 from transformers import RobertaTokenizer
@@ -117,15 +118,51 @@ def preprocess_training_data(tokenizer: RobertaTokenizer) -> TensorDataset:
 
 
 def main():
+    from transformers import T5ForConditionalGeneration
+
+    if torch.backends.mps.is_available():
+        device = "mps"
+    elif torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+
+    print(f"Using device: {device}")
+
+    model = T5ForConditionalGeneration.from_pretrained("Salesforce/codet5-base")
+    model = model.to(device)
+
     tokenizer = RobertaTokenizer.from_pretrained("Salesforce/codet5-base")
     train_data = preprocess_training_data(tokenizer)
     train_sampler = RandomSampler(train_data)
     train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=8)
 
-    for batch in train_dataloader:
-        # 2 components per batch - inputs and targets (8, 256), (8, 128)
-        print(batch)
-        break
+    optimizer = AdamW(model.parameters(), lr=5e-5)
+    model.train()  # Set to training mode
+
+    for epoch in range(1):
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch}")
+
+        for step, batch in enumerate(progress_bar):
+            input_ids = batch[0].to(device)
+            labels = batch[1].to(device)
+
+            outputs = model(input_ids=input_ids, labels=labels)
+            loss = outputs.loss
+
+            # Backward pass
+            loss.backward()
+
+            # Update weights
+            optimizer.step()
+            optimizer.zero_grad()
+
+            # Update progress bar
+            progress_bar.set_postfix(loss=loss.item())
+
+            # Print progress
+            if step % 100 == 0:
+                print(f"Epoch: {epoch}, Step: {step}, Loss: {loss.item():.4f}")
 
 
 if __name__ == "__main__":
