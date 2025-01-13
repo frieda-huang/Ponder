@@ -1,7 +1,9 @@
 # Adapted from https://github.com/salesforce/CodeT5/blob/e78a61a17f6dc2f3cbb968447d3e2d065b426e7b/CodeT5/_utils.py
+import copy
 import gzip
 import json
 import multiprocessing
+from dataclasses import dataclass
 from typing import List
 
 import torch
@@ -11,7 +13,7 @@ from src.commons import project_paths
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, RandomSampler, TensorDataset
 from tqdm import tqdm
-from transformers import RobertaTokenizer
+from transformers import PreTrainedModel, RobertaTokenizer
 
 max_source_length = 256
 max_target_length = 128
@@ -115,6 +117,78 @@ def preprocess_training_data(tokenizer: RobertaTokenizer) -> TensorDataset:
     assert all_target_ids.shape == (len(examples), max_target_length)  # (30,000, 128)
 
     return TensorDataset(all_source_ids, all_target_ids)
+
+
+# T5 architecture configuration
+@dataclass
+class T5Config:
+    vocab_size = 32128
+    d_model = 512  # Size of the encoder layers and the pooler layer
+    d_kv = 64  # Size of the key, query, value projections per attention head
+    d_ff = 2048  # Size of the intermediate feed forward layer in each `T5Block`
+    num_layers = 6  # Number of hidden layers in the Transformer encoder
+    num_decoder_layers = 6  # Number of hidden layers in the Transformer decoder
+    num_heads = 8  # Number of attention heads for each attention layer in the Transformer encoder
+    # The number of buckets to use for each attention layer
+    relative_attention_num_buckets = 32
+    dropout_rate = 0.1
+    layer_norm_epsilon = 1e-6
+    initializer_factor = 1.0
+    is_encoder_decoder = True
+    pad_token_id = 0
+    eos_token_id = 1
+    is_decoder = False
+
+
+class T5LayerNorm(nn.Module):
+    pass
+
+
+class T5Attention(nn.Module):
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.n_heads = config.num_heads
+        self.key_value_proj_dim = config.d_kv
+        self.d_model = config.d_model
+        self.inner_dim = self.n_heads * self.key_value_proj_dim
+
+        self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)
+        self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
+        self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)
+
+        self.out_proj = nn.Linear(self.inner_dim, self.d_model, bias=False)
+
+        self.dropout = nn.Dropout(config.dropout_rate)
+        self.layer_norm = T5LayerNorm(config.d_model, config.layer_norm_epsilon)
+
+
+class T5Block(nn.Module):
+    pass
+
+
+class T5Stack(nn.Module):
+    pass
+
+
+class T5Model(PreTrainedModel):
+    def __init__(self, config: T5Config):
+        super().__init__(config)
+        self.shared = nn.Embedding(config.vocab_size, config.d_model)
+
+        encoder_config = copy.deepcopy(config)
+        encoder_config.is_decoder = False  # Encoder
+
+        decoder_config = copy.deepcopy(config)
+        decoder_config.is_decoder = True
+
+        decoder_config.num_layers = config.num_decoder_layers
+
+        self.encoder = T5Stack(encoder_config, self.shared)
+        self.decoder = T5Stack(decoder_config, self.shared)
+
+
+class T5ForConditionalGeneration(nn.Module):
+    pass
 
 
 def main():
