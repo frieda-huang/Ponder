@@ -4,6 +4,7 @@ import gzip
 import json
 import multiprocessing
 from dataclasses import dataclass
+from turtle import forward
 from typing import List
 
 import torch
@@ -144,6 +145,10 @@ class T5LayerNorm(nn.Module):
     pass
 
 
+# Differences between T5 and the original Transformer attention
+# 1. T5 uses relative position encodings (`_relative_position_bucket` and `compute_bias`) instead of absolute position encodings
+# 2. T5 uses a separate dimension (`d_kv`) for keys and values that can be different from `d_model/num_heads`
+# 3. T5 uses pre-norm + residual
 class T5Attention(nn.Module):
     def __init__(self, config: T5Config):
         super().__init__()
@@ -151,15 +156,33 @@ class T5Attention(nn.Module):
         self.key_value_proj_dim = config.d_kv
         self.d_model = config.d_model
         self.inner_dim = self.n_heads * self.key_value_proj_dim
+        self.relative_attention_num_buckets = config.relative_attention_num_buckets
+        self.dropout = config.dropout_rate
 
         self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
         self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)
+        self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)
 
-        self.out_proj = nn.Linear(self.inner_dim, self.d_model, bias=False)
+        self.relative_attention_bias = nn.Embedding(
+            self.relative_attention_num_buckets, self.n_heads
+        )
 
+
+class T5LayerSelfAttention(nn.Module):
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.attention = T5Attention(config)
+        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
-        self.layer_norm = T5LayerNorm(config.d_model, config.layer_norm_epsilon)
+
+    def forward(self, hidden_states, mask=None):
+        # Layer norm first (pre-norm architecture)
+        normed_hidden_states = self.layer_norm(hidden_states)
+        attention_output = self.attention(normed_hidden_states, mask=mask)
+        hidden_states = hidden_states + attention_output
+
+        return hidden_states
 
 
 class T5Block(nn.Module):
