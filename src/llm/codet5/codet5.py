@@ -4,7 +4,6 @@ import gzip
 import json
 import multiprocessing
 from dataclasses import dataclass
-from turtle import forward
 from typing import List
 
 import torch
@@ -142,7 +141,31 @@ class T5Config:
 
 
 class T5LayerNorm(nn.Module):
-    pass
+    """T5-specific layer normalization using RMS (Root Mean Square) Normalization
+
+    Unlike traditional Layer Normalization, T5 uses RMS Norm which:
+    1. Omits mean subtraction (centering)
+    2. Only normalizes by the root mean square
+    3. Applies learnable per-feature scaling factors
+
+    Args:
+        hidden_size: Dimension of the hidden states (feature dimension)
+        eps: Small constant for numerical stability (default: 1e-6)
+    """
+
+    def __init__(self, hidden_size, eps=1e-6):
+        super().__init__()
+        # Learnable parameter initialized to ones; allow the network to learn an optimal scaling for each feature dimension
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        # Note that RMS: x/sqrt(variance), which is different from standard layer norm: (x - mean)/sqrt(variance)
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        normalized = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+
+        # Each feature is scaled by its own learned factor, allowing the model to amplify important features
+        return self.weight * normalized
 
 
 # Differences between T5 and the original Transformer attention
