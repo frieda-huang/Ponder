@@ -2,11 +2,15 @@
 import copy
 import gzip
 import json
+import math
 import multiprocessing
 from dataclasses import dataclass
+from re import S
 from typing import List
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from pydantic import BaseModel
 from rich import print
 from src.commons import project_paths
@@ -131,6 +135,7 @@ class T5Config:
     num_heads = 8  # Number of attention heads for each attention layer in the Transformer encoder
     # The number of buckets to use for each attention layer
     relative_attention_num_buckets = 32
+    relative_attention_max_distance = 128
     dropout_rate = 0.1
     layer_norm_epsilon = 1e-6
     initializer_factor = 1.0
@@ -176,10 +181,15 @@ class T5Attention(nn.Module):
     def __init__(self, config: T5Config):
         super().__init__()
         self.n_heads = config.num_heads
-        self.key_value_proj_dim = config.d_kv
-        self.d_model = config.d_model
-        self.inner_dim = self.n_heads * self.key_value_proj_dim
+        self.key_value_proj_dim = config.d_kv  # Dimension size for each attention head
+        self.d_model = config.d_model  # Embedding dimension
+        self.inner_dim = (
+            self.n_heads * self.key_value_proj_dim
+        )  # Total dimension across all attention heads
+        self.has_relative_attention_bias = True
+
         self.relative_attention_num_buckets = config.relative_attention_num_buckets
+        self.relative_attention_max_distance = config.relative_attention_max_distance
         self.dropout = config.dropout_rate
 
         self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)
@@ -187,9 +197,103 @@ class T5Attention(nn.Module):
         self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)
         self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)
 
+        # Embedding table for relative position buckets
         self.relative_attention_bias = nn.Embedding(
             self.relative_attention_num_buckets, self.n_heads
         )
+
+    def relative_position_bucket(
+        self, relative_position, num_buckets=32, max_distance=128
+    ):
+        """Translate relative positions into bucket indices"""
+        # Handle bidirectional case
+        relative_buckets = 0
+        num_buckets //= 2  # Split buckets into two halves: 0-15 for negative positions and 16-31 for positive positions
+        relative_buckets += (relative_position > 0).to(torch.long) * num_buckets
+        relative_position = torch.abs(relative_position)
+
+        max_exact = num_buckets // 2  # First 8 positions get their own exact buckets
+        is_small = relative_position < max_exact
+
+        relative_pos_if_large = max_exact + (
+            torch.log(relative_position.float() / max_exact)
+            / math.log(max_distance / max_exact)  # Normalizing factor
+            * (num_buckets - max_exact)  # Remaining buckets
+        ).to(torch.long)
+
+        relative_pos_if_large = torch.min(
+            relative_pos_if_large,
+            torch.full_like(relative_pos_if_large, num_buckets - 1),
+        )
+        relative_buckets += torch.where(
+            is_small, relative_position, relative_pos_if_large
+        )
+
+        return relative_buckets
+
+    def compute_bias(self, query_length, key_length):
+        """Compute relative position bias between query and key positions"""
+
+        context_position = torch.arange(query_length)[:, None]  # (query_length, 1)
+        memory_position = torch.arange(key_length)[None, :]  # (1, key_length)
+
+        # Calculate relative positions; shape: (query_length, key_length)
+        relative_position = memory_position - context_position
+
+        # Convert to bucket indices
+        relative_position_bucket = self.relative_position_bucket(
+            relative_position,
+            num_buckets=self.relative_attention_num_buckets,
+            max_distance=self.relative_attention_max_distance,
+        )
+
+        # Look up biases from embedding table
+        values = self.relative_attention_bias(relative_position_bucket)
+
+        # Shape = (1, num_heads, query_length, key_length)
+        values = values.permute([2, 0, 1]).unsqueeze(0)
+
+        return values
+
+    def forward(self, hidden_states):
+        batch_size, seq_len = hidden_states.shape[:2]
+
+        k = self.k(hidden_states)
+        q = self.q(hidden_states)
+        v = self.v(hidden_states)
+
+        # Project and reshape: (batch_size, seq_len, n_heads, key_value_proj_dim)
+        k = k.view(batch_size, seq_len, self.n_heads, self.key_value_proj_dim)
+        q = q.view(batch_size, seq_len, self.n_heads, self.key_value_proj_dim)
+        v = v.view(batch_size, seq_len, self.n_heads, self.key_value_proj_dim)
+
+        # (batch_size, n_heads, seq_len, key_value_proj_dim)
+        k = k.transpose(1, 2)
+        q = q.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # Compute attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1))
+
+        if self.has_relative_attention_bias:
+            position_bias = self.compute_bias(seq_len, seq_len)
+            scores = scores + position_bias
+
+        scores = scores / math.sqrt(self.key_value_proj_dim)
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
+
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)
+
+        # Reshape and project back (batch_size, seq_len, n_heads, key_value_proj_dim)
+        # .contiguous() ensures tensor is stored contiguously in memory for efficient reshaping
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, self.inner_dim)
+        attn_output = self.o(attn_output)
+
+        # (batch_size, seq_len, d_model)
+        return attn_output
 
 
 class T5LayerSelfAttention(nn.Module):
