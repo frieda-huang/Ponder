@@ -234,8 +234,8 @@ class T5Attention(nn.Module):
     def compute_bias(self, query_length, key_length):
         """Compute relative position bias between query and key positions"""
 
-        context_position = torch.arange(query_length)[:, None]  # (query_length, 1)
-        memory_position = torch.arange(key_length)[None, :]  # (1, key_length)
+        context_position = torch.arange(query_length).unsqueeze(1)  # (query_length, 1)
+        memory_position = torch.arange(key_length).unsqueeze(0)  # (1, key_length)
 
         # Calculate relative positions; shape: (query_length, key_length)
         relative_position = memory_position - context_position
