@@ -1,11 +1,9 @@
 # Adapted from https://github.com/salesforce/CodeT5/blob/e78a61a17f6dc2f3cbb968447d3e2d065b426e7b/CodeT5/_utils.py
-import copy
 import gzip
 import json
 import math
 import multiprocessing
 from dataclasses import dataclass
-from re import S
 from typing import List
 
 import torch
@@ -178,7 +176,7 @@ class T5LayerNorm(nn.Module):
 # 2. T5 uses a separate dimension (`d_kv`) for keys and values that can be different from `d_model/num_heads`
 # 3. T5 uses pre-norm + residual
 class T5Attention(nn.Module):
-    def __init__(self, config: T5Config):
+    def __init__(self, config: T5Config, has_relative_attention_bias=True):
         super().__init__()
         self.n_heads = config.num_heads
         self.key_value_proj_dim = config.d_kv  # Dimension size for each attention head
@@ -186,7 +184,7 @@ class T5Attention(nn.Module):
         self.inner_dim = (
             self.n_heads * self.key_value_proj_dim
         )  # Total dimension across all attention heads
-        self.has_relative_attention_bias = True
+        self.has_relative_attention_bias = has_relative_attention_bias
 
         self.relative_attention_num_buckets = config.relative_attention_num_buckets
         self.relative_attention_max_distance = config.relative_attention_max_distance
@@ -312,29 +310,171 @@ class T5LayerSelfAttention(nn.Module):
         return hidden_states
 
 
+class T5LayerCrossAttention(nn.Module):
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.encoder_decoder_attn = T5Attention(
+            config, has_relative_attention_bias=False
+        )
+        self.layer_norm = T5LayerNorm(config.d_model)
+        self.dropout = nn.Dropout(config.dropout_rate)
+
+    def forward(
+        self, hidden_states, key_value_states, attention_mask=None, position_bias=None
+    ):
+        normed_hidden_states = self.layer_norm(hidden_states)
+        attention_output = self.encoder_decoder_attn(
+            normed_hidden_states,
+            key_value_states=key_value_states,
+            attention_mask=attention_mask,
+            position_bias=position_bias,
+        )
+        layer_output = hidden_states + self.dropout(attention_output[0])
+        return layer_output
+
+
+class T5DenseActDense(nn.Module):
+    def __init__(self, config: T5Config):
+        super().__init__()
+
+        # First projection (expansion)
+        self.wi = nn.Linear(config.d_model, config.d_ff, bias=False)
+
+        # Second projection (contraction)
+        self.wo = nn.Linear(config.d_ff, config.d_model, bias=False)
+        self.dropout = nn.Dropout(config.dropout_rate)
+        self.act = nn.ReLU()  # Activation function
+
+    def forward(self, hidden_states):
+        hidden_states = self.wi(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.wo(hidden_states)
+
+        return hidden_states
+
+
+class T5LayerFeedForward(nn.Module):
+    """Feed-forward layer with layer norm and residual connection"""
+
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.feedforward = T5DenseActDense(config)
+        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.dropout = nn.Dropout(config.dropout_rate)
+
+    def forward(self, hidden_states):
+        normed_hidden_states = self.layer_norm(hidden_states)
+        ff_output = self.feedforward(normed_hidden_states)
+
+        return hidden_states + self.dropout(ff_output)
+
+
 class T5Block(nn.Module):
-    pass
+    def __init__(self, config: T5Config, has_relative_attention_bias=False):
+        """
+        Self-attention allows the model to relate different positions within the same sequence
+        Cross-attention allows the decoder to attent to encoder outputs
+        Feed-forward processes each position independently with a small neural network
+        """
+        super().__init__()
+        self.is_decoder = config.is_decoder
+        self.layer = nn.ModuleList()
+        # Always add self-attention as first layer
+        self.layer.append(T5LayerSelfAttention(config, has_relative_attention_bias))
+
+        # For decoder only, add cross-attention as second layer
+        if self.is_decoder:
+            self.layer.append(T5LayerCrossAttention(config))
+
+        # Always add feed-forward as last layer
+        self.layer.append(T5LayerFeedForward(config))
+
+    def forward(
+        self,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        encoder_attention_mask=None,
+    ):
+        # Self attention
+        hidden_states = self.layer[0](hidden_states, attention_mask)
+
+        # Cross attention (decoder only)
+        if self.is_decoder and encoder_hidden_states is not None:
+            hidden_states = self.layer[1](
+                hidden_states, encoder_hidden_states, encoder_attention_mask
+            )
+
+        # Feed-forward
+        hidden_states = self.layer[-1](hidden_states)
+
+        return hidden_states
 
 
 class T5Stack(nn.Module):
-    pass
+    """Stack of encoder/decoder blocks"""
+
+    def __init__(self, config: T5Config, is_decoder=False):
+        super().__init__()
+        self.config = config
+        self.is_decoder = is_decoder
+        self.block = nn.ModuleList(
+            [
+                T5Block(config, is_decoder)
+                for _ in range(
+                    config.num_decoder_layers if is_decoder else config.num_layers
+                )
+            ]
+        )
+        self.final_layer_norm = T5LayerNorm(config.d_model)
+
+    def forward(
+        self,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        encoder_attention_mask=None,
+    ):
+        for block in self.block:
+            hidden_states = block(
+                hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                attention_mask=attention_mask,
+                encoder_attention_mask=encoder_attention_mask,
+            )
+        return self.final_layer_norm(hidden_states)
 
 
 class T5Model(PreTrainedModel):
     def __init__(self, config: T5Config):
         super().__init__(config)
         self.shared = nn.Embedding(config.vocab_size, config.d_model)
+        self.encoder = T5Stack(config, is_decoder=False)
+        self.decoder = T5Stack(config, is_decoder=True)
 
-        encoder_config = copy.deepcopy(config)
-        encoder_config.is_decoder = False  # Encoder
+    def forward(
+        self,
+        input_ids,
+        decoder_input_ids,
+        attention_mask=None,
+        decoder_attention_mask=None,
+    ):
+        # Encode
+        encoder_hidden_states = self.shared(input_ids)
+        encoder_hidden_states = self.encoder(
+            encoder_hidden_states, attention_mask=attention_mask
+        )
 
-        decoder_config = copy.deepcopy(config)
-        decoder_config.is_decoder = True
+        # Decode
+        decoder_hidden_states = self.shared(decoder_input_ids)
+        decoder_hidden_states = self.decoder(
+            decoder_hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            attention_mask=decoder_attention_mask,
+            encoder_attention_mask=attention_mask,
+        )
 
-        decoder_config.num_layers = config.num_decoder_layers
-
-        self.encoder = T5Stack(encoder_config, self.shared)
-        self.decoder = T5Stack(decoder_config, self.shared)
+        return decoder_hidden_states
 
 
 class T5ForConditionalGeneration(nn.Module):
