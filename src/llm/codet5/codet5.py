@@ -295,9 +295,11 @@ class T5Attention(nn.Module):
 
 
 class T5LayerSelfAttention(nn.Module):
-    def __init__(self, config: T5Config):
+    def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__()
-        self.attention = T5Attention(config)
+        self.attention = T5Attention(
+            config, has_relative_attention_bias=has_relative_attention_bias
+        )
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
@@ -316,7 +318,7 @@ class T5LayerCrossAttention(nn.Module):
         self.encoder_decoder_attn = T5Attention(
             config, has_relative_attention_bias=False
         )
-        self.layer_norm = T5LayerNorm(config.d_model)
+        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(
