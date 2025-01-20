@@ -307,7 +307,7 @@ class T5LayerSelfAttention(nn.Module):
         # Layer norm first (pre-norm architecture)
         normed_hidden_states = self.layer_norm(hidden_states)
         attention_output = self.attention(normed_hidden_states, mask=mask)
-        hidden_states = hidden_states + attention_output
+        hidden_states = hidden_states + self.dropout(attention_output[0])
 
         return hidden_states
 
