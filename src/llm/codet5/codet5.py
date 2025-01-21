@@ -416,43 +416,64 @@ class T5Block(nn.Module):
 class T5Stack(nn.Module):
     """Stack of encoder/decoder blocks"""
 
-    def __init__(self, config: T5Config, is_decoder=False):
+    def __init__(self, config: T5Config, embed_tokens):
         super().__init__()
-        self.config = config
-        self.is_decoder = is_decoder
+        self.embed_tokens = embed_tokens
+        self.is_decoder = config.is_decoder
+
         self.block = nn.ModuleList(
             [
-                T5Block(config, is_decoder)
-                for _ in range(
-                    config.num_decoder_layers if is_decoder else config.num_layers
-                )
+                # Only the first layer (i==0) gets relative attention bias
+                T5Block(config, has_relative_attention_bias=bool(i == 0))
+                for i in range(config.num_layers)
             ]
         )
-        self.final_layer_norm = T5LayerNorm(config.d_model)
+        self.final_layer_norm = T5LayerNorm(
+            config.d_model, eps=config.layer_norm_epsilon
+        )
+        self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(
         self,
-        hidden_states,
+        input_ids,
         encoder_hidden_states=None,
         attention_mask=None,
         encoder_attention_mask=None,
     ):
-        for block in self.block:
-            hidden_states = block(
-                hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                attention_mask=attention_mask,
-                encoder_attention_mask=encoder_attention_mask,
-            )
-        return self.final_layer_norm(hidden_states)
+        hidden_states = self.embed_tokens(input_ids)
+        position_bias = None
+
+        for _, layer_module in enumerate(self.block):
+            if self.is_decoder:
+                hidden_states, position_bias = layer_module(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    position_bias=position_bias,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                )
+            else:
+                hidden_states, position_bias = layer_module(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    position_bias=position_bias,
+                )
+
+        hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+
+        return hidden_states
 
 
 class T5Model(PreTrainedModel):
     def __init__(self, config: T5Config):
         super().__init__(config)
         self.shared = nn.Embedding(config.vocab_size, config.d_model)
-        self.encoder = T5Stack(config, is_decoder=False)
-        self.decoder = T5Stack(config, is_decoder=True)
+        self.encoder = T5Stack(config, self.shared)
+
+        decoder_config = copy.deepcopy(config)
+        decoder_config.is_decoder = True
+        self.decoder = T5Stack(decoder_config, self.shared)
 
     def forward(
         self,
@@ -461,22 +482,15 @@ class T5Model(PreTrainedModel):
         attention_mask=None,
         decoder_attention_mask=None,
     ):
-        # Encode
-        encoder_hidden_states = self.shared(input_ids)
-        encoder_hidden_states = self.encoder(
-            encoder_hidden_states, attention_mask=attention_mask
-        )
-
-        # Decode
-        decoder_hidden_states = self.shared(decoder_input_ids)
-        decoder_hidden_states = self.decoder(
-            decoder_hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
+        encoder_outputs = self.encoder(input_ids, attention_mask=attention_mask)
+        decoder_outputs = self.decoder(
+            decoder_input_ids,
             attention_mask=decoder_attention_mask,
+            encoder_hidden_states=encoder_outputs,
             encoder_attention_mask=attention_mask,
         )
 
-        return decoder_hidden_states
+        return decoder_outputs
 
 
 class T5ForConditionalGeneration(nn.Module):
