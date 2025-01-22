@@ -253,7 +253,7 @@ class T5Attention(nn.Module):
 
         return values
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, attention_mask):
         batch_size, seq_len = hidden_states.shape[:2]
 
         k = self.k(hidden_states)
@@ -303,11 +303,15 @@ class T5LayerSelfAttention(nn.Module):
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
-    def forward(self, hidden_states, mask=None):
+    def forward(self, hidden_states, attention_mask=None, position_bias=None):
         # Layer norm first (pre-norm architecture)
         normed_hidden_states = self.layer_norm(hidden_states)
-        attention_output = self.attention(normed_hidden_states, mask=mask)
-        hidden_states = hidden_states + self.dropout(attention_output[0])
+        attention_output = self.attention(
+            normed_hidden_states,
+            attention_mask=attention_mask,
+            position_bias=position_bias,
+        )
+        hidden_states = hidden_states + self.dropout(attention_output)
 
         return hidden_states
 
