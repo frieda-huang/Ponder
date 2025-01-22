@@ -394,8 +394,10 @@ class T5Block(nn.Module):
 
     def forward(
         self,
-        encoder_hidden_states=None,
+        hidden_states,
         attention_mask=None,
+        position_bias=None,
+        encoder_hidden_states=None,
         encoder_attention_mask=None,
     ):
         # Self attention
@@ -404,7 +406,10 @@ class T5Block(nn.Module):
         # Cross attention (decoder only)
         if self.is_decoder and encoder_hidden_states is not None:
             hidden_states = self.layer[1](
-                hidden_states, encoder_hidden_states, encoder_attention_mask
+                hidden_states,  # Queries: "What should come after 'The cat is'?"
+                key_value_states=encoder_hidden_states,  # Keys/Values: Look up information from "Le chat est noir"
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
             )
 
         # Feed-forward
