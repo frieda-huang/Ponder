@@ -5,6 +5,7 @@ import math
 import multiprocessing
 from dataclasses import dataclass
 from typing import List
+from unicodedata import bidirectional
 
 import torch
 import torch.nn as nn
@@ -176,9 +177,10 @@ class T5LayerNorm(nn.Module):
 # 2. T5 uses a separate dimension (`d_kv`) for keys and values that can be different from `d_model/num_heads`
 # 3. T5 uses pre-norm + residual
 class T5Attention(nn.Module):
-    def __init__(self, config: T5Config, has_relative_attention_bias=True):
+    def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__()
         self.n_heads = config.num_heads
+        self.is_decoder = config.is_decoder
         self.key_value_proj_dim = config.d_kv  # Dimension size for each attention head
         self.d_model = config.d_model  # Embedding dimension
         self.inner_dim = (
@@ -196,19 +198,25 @@ class T5Attention(nn.Module):
         self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)
 
         # Embedding table for relative position buckets
-        self.relative_attention_bias = nn.Embedding(
-            self.relative_attention_num_buckets, self.n_heads
-        )
+        if self.has_relative_attention_bias:
+            self.relative_attention_bias = nn.Embedding(
+                self.relative_attention_num_buckets, self.n_heads
+            )
 
     def relative_position_bucket(
-        self, relative_position, num_buckets=32, max_distance=128
+        self, relative_position, bidirectional=True, num_buckets=32, max_distance=128
     ):
         """Translate relative positions into bucket indices"""
         # Handle bidirectional case
         relative_buckets = 0
-        num_buckets //= 2  # Split buckets into two halves: 0-15 for negative positions and 16-31 for positive positions
-        relative_buckets += (relative_position > 0).to(torch.long) * num_buckets
-        relative_position = torch.abs(relative_position)
+        if bidirectional:
+            num_buckets //= 2  # Split buckets into two halves: 0-15 for negative positions and 16-31 for positive positions
+            relative_buckets += (relative_position > 0).to(torch.long) * num_buckets
+            relative_position = torch.abs(relative_position)
+        else:  # Handle unidirectional case (decoder self-attention)
+            relative_position = -torch.min(
+                relative_position, torch.zeros_like(relative_position)
+            )
 
         max_exact = num_buckets // 2  # First 8 positions get their own exact buckets
         is_small = relative_position < max_exact
@@ -241,6 +249,7 @@ class T5Attention(nn.Module):
         # Convert to bucket indices
         relative_position_bucket = self.relative_position_bucket(
             relative_position,
+            bidirectional=not self.is_decoder,  # Bidirectional for encoder, unidirectional for decoder
             num_buckets=self.relative_attention_num_buckets,
             max_distance=self.relative_attention_max_distance,
         )
@@ -253,17 +262,29 @@ class T5Attention(nn.Module):
 
         return values
 
-    def forward(self, hidden_states, attention_mask):
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        key_value_states=None,
+        position_bias=None,
+    ):
+        # hidden_states: [batch_size, seq_len, d_model]
         batch_size, seq_len = hidden_states.shape[:2]
+        is_cross_attention = key_value_states is not None
 
-        k = self.k(hidden_states)
         q = self.q(hidden_states)
-        v = self.v(hidden_states)
+
+        # key_value_states is from encoder
+        current_states = key_value_states if is_cross_attention else hidden_states
+
+        k = self.k(current_states)
+        v = self.v(current_states)
 
         # Project and reshape: (batch_size, seq_len, n_heads, key_value_proj_dim)
-        k = k.view(batch_size, seq_len, self.n_heads, self.key_value_proj_dim)
-        q = q.view(batch_size, seq_len, self.n_heads, self.key_value_proj_dim)
-        v = v.view(batch_size, seq_len, self.n_heads, self.key_value_proj_dim)
+        k = k.view(batch_size, -1, self.n_heads, self.key_value_proj_dim)
+        q = q.view(batch_size, -1, self.n_heads, self.key_value_proj_dim)
+        v = v.view(batch_size, -1, self.n_heads, self.key_value_proj_dim)
 
         # (batch_size, n_heads, seq_len, key_value_proj_dim)
         k = k.transpose(1, 2)
@@ -272,12 +293,27 @@ class T5Attention(nn.Module):
 
         # Compute attention scores
         scores = torch.matmul(q, k.transpose(-2, -1))
+        key_length = k.shape[-2]
 
-        if self.has_relative_attention_bias:
-            position_bias = self.compute_bias(seq_len, seq_len)
-            scores = scores + position_bias
+        # Handle position bias (either cached or computed)
+        if position_bias is None:
+            if not self.has_relative_attention_bias:
+                position_bias = torch.zeros(
+                    (1, self.n_heads, seq_len, key_length),
+                    device=scores.device,
+                    dtype=scores.dtype,
+                )
+            else:
+                position_bias = self.compute_bias(seq_len, key_length)
 
-        scores = scores / math.sqrt(self.key_value_proj_dim)
+            # Add attention mask if provided
+            if attention_mask is not None:
+                causal_mask = attention_mask[:, :, :, : k.shape[-2]]
+                position_bias = position_bias + causal_mask
+
+        # Add position bias to scores
+        scores += position_bias
+
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
 
@@ -287,11 +323,11 @@ class T5Attention(nn.Module):
         # Reshape and project back (batch_size, seq_len, n_heads, key_value_proj_dim)
         # .contiguous() ensures tensor is stored contiguously in memory for efficient reshaping
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(batch_size, seq_len, self.inner_dim)
+        attn_output = attn_output.view(batch_size, -1, self.inner_dim)
         attn_output = self.o(attn_output)
 
         # (batch_size, seq_len, d_model)
-        return attn_output
+        return attn_output, position_bias
 
 
 class T5LayerSelfAttention(nn.Module):
@@ -335,7 +371,7 @@ class T5LayerCrossAttention(nn.Module):
             attention_mask=attention_mask,
             position_bias=position_bias,
         )
-        layer_output = hidden_states + self.dropout(attention_output[0])
+        layer_output = hidden_states + self.dropout(attention_output)
         return layer_output
 
 
@@ -454,6 +490,7 @@ class T5Stack(nn.Module):
 
         for _, layer_module in enumerate(self.block):
             if self.is_decoder:
+                # Reuse position_bias across layers
                 hidden_states, position_bias = layer_module(
                     hidden_states,
                     attention_mask=attention_mask,
