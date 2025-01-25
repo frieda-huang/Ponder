@@ -5,7 +5,6 @@ import math
 import multiprocessing
 from dataclasses import dataclass
 from typing import List
-from unicodedata import bidirectional
 
 import torch
 import torch.nn as nn
@@ -326,7 +325,8 @@ class T5Attention(nn.Module):
         attn_output = attn_output.view(batch_size, -1, self.inner_dim)
         attn_output = self.o(attn_output)
 
-        # (batch_size, seq_len, d_model)
+        # attn_output shape: (batch_size, seq_len, d_model)
+        # position_bias shape:(1, n_heads, seq_len, key_length)
         return attn_output, position_bias
 
 
@@ -396,12 +396,30 @@ class T5DenseActDense(nn.Module):
         return hidden_states
 
 
+class T5DenseGatedActDense(nn.Module):
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.wi_0 = nn.Linear(config.d_model, config.d_ff, bias=False)
+        self.wi_1 = nn.Linear(config.d_model, config.d_ff, bias=False)
+        self.wo = nn.Linear(config.d_ff, config.d_model, bias=False)
+        self.dropout = nn.Dropout(config.dropout_rate)
+        self.act = nn.GELU()
+
+    def forward(self, hidden_states):
+        hidden_gelu = self.act(self.wi_0(hidden_states))  # Activated branch
+        hidden_linear = self.wi_1(hidden_states)  # Linear gating branch
+        hidden_states = hidden_gelu * hidden_linear  # Element-wise multiplication
+        hidden_states = self.dropout(hidden_states)  # Regularization
+        hidden_states = self.wo(hidden_states)  # Project back to d_model
+        return hidden_states
+
+
 class T5LayerFeedForward(nn.Module):
     """Feed-forward layer with layer norm and residual connection"""
 
     def __init__(self, config: T5Config):
         super().__init__()
-        self.feedforward = T5DenseActDense(config)
+        self.feedforward = T5DenseGatedActDense(config)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
