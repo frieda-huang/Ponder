@@ -1,4 +1,5 @@
 # Adapted from https://github.com/salesforce/CodeT5/blob/e78a61a17f6dc2f3cbb968447d3e2d065b426e7b/CodeT5/_utils.py
+import copy
 import gzip
 import json
 import math
@@ -558,12 +559,50 @@ class T5Model(PreTrainedModel):
 
 
 class T5ForConditionalGeneration(nn.Module):
-    pass
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.model_dim = config.d_model
+
+        # Shared embedding layer for encoder and decoder
+        self.shared = nn.Embedding(config.vocab_size, config.d_model)
+
+        # Encoder configuration
+        encoder_config = copy.deepcopy(config)
+        encoder_config.is_decoder = False
+        self.encoder = T5Stack(encoder_config, self.shared)
+
+        # Decoder configuration
+        decoder_config = copy.deepcopy(config)
+        decoder_config.is_decoder = True
+        self.decoder = T5Stack(decoder_config, self.shared)
+
+        # Language modeling head
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+
+    def forward(self, input_ids, decoder_input_ids, labels=None):
+        # Encoding
+        encoder_outputs = self.encoder(input_ids=input_ids)
+
+        # Decoding
+        decoder_outputs = self.decoder(
+            input_ids=decoder_input_ids,
+            encoder_hidden_states=encoder_outputs[0],
+        )
+
+        # Compute logits
+        sequence_output = decoder_outputs[0]
+        lm_logits = self.lm_head(sequence_output)
+
+        # Compute loss (if labels are provided)
+        loss = None
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
+
+        return (loss, lm_logits) if loss is not None else lm_logits
 
 
 def main():
-    from transformers import T5ForConditionalGeneration
-
     if torch.backends.mps.is_available():
         device = "mps"
     elif torch.cuda.is_available():
