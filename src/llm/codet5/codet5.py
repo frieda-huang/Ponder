@@ -119,7 +119,15 @@ def preprocess_training_data(tokenizer: RobertaTokenizer) -> TensorDataset:
     assert all_source_ids.shape == (len(examples), max_source_length)  # (30,000, 256)
     assert all_target_ids.shape == (len(examples), max_target_length)  # (30,000, 128)
 
-    return TensorDataset(all_source_ids, all_target_ids)
+    # Create labels by replacing padding after EOS with -100
+    labels = all_target_ids.clone()
+    eos_token_id = tokenizer.eos_token_id
+    for i in range(labels.size(0)):
+        eos_pos = (labels[i] == eos_token_id).nonzero()
+        if eos_pos.numel() > 0:
+            labels[i, eos_pos[0] + 1 :] = -100  # Mask padding after EOS
+
+    return TensorDataset(all_source_ids, all_target_ids, labels)
 
 
 # T5 architecture configuration
@@ -239,9 +247,13 @@ class T5Attention(nn.Module):
 
     def compute_bias(self, query_length, key_length):
         """Compute relative position bias between query and key positions"""
+        device = self.relative_attention_bias.weight.device
 
-        context_position = torch.arange(query_length).unsqueeze(1)  # (query_length, 1)
-        memory_position = torch.arange(key_length).unsqueeze(0)  # (1, key_length)
+        # (query_length, 1)
+        context_position = torch.arange(query_length, device=device).unsqueeze(1)
+
+        # (1, key_length)
+        memory_position = torch.arange(key_length, device=device).unsqueeze(0)
 
         # Calculate relative positions; shape: (query_length, key_length)
         relative_position = memory_position - context_position
@@ -343,14 +355,14 @@ class T5LayerSelfAttention(nn.Module):
     def forward(self, hidden_states, attention_mask=None, position_bias=None):
         # Layer norm first (pre-norm architecture)
         normed_hidden_states = self.layer_norm(hidden_states)
-        attention_output = self.attention(
+        attention_output, position_bias = self.attention(
             normed_hidden_states,
             attention_mask=attention_mask,
             position_bias=position_bias,
         )
         hidden_states = hidden_states + self.dropout(attention_output)
 
-        return hidden_states
+        return hidden_states, position_bias
 
 
 class T5LayerCrossAttention(nn.Module):
@@ -363,17 +375,24 @@ class T5LayerCrossAttention(nn.Module):
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(
-        self, hidden_states, key_value_states, attention_mask=None, position_bias=None
+        self,
+        hidden_states,
+        key_value_states,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        attention_mask=None,
+        position_bias=None,
     ):
         normed_hidden_states = self.layer_norm(hidden_states)
-        attention_output = self.encoder_decoder_attn(
+        attention_output, position_bias = self.encoder_decoder_attn(
             normed_hidden_states,
             key_value_states=key_value_states,
             attention_mask=attention_mask,
             position_bias=position_bias,
         )
-        layer_output = hidden_states + self.dropout(attention_output)
-        return layer_output
+        hidden_states = hidden_states + self.dropout(attention_output)
+
+        return hidden_states, position_bias
 
 
 class T5DenseActDense(nn.Module):
@@ -460,11 +479,11 @@ class T5Block(nn.Module):
         encoder_attention_mask=None,
     ):
         # Self attention
-        hidden_states = self.layer[0](hidden_states, attention_mask)
+        hidden_states, position_bias = self.layer[0](hidden_states, attention_mask)
 
         # Cross attention (decoder only)
         if self.is_decoder and encoder_hidden_states is not None:
-            hidden_states = self.layer[1](
+            hidden_states, _ = self.layer[1](
                 hidden_states,  # Queries: "What should come after 'The cat is'?"
                 key_value_states=encoder_hidden_states,  # Keys/Values: Look up information from "Le chat est noir"
                 encoder_hidden_states=encoder_hidden_states,
@@ -474,7 +493,7 @@ class T5Block(nn.Module):
         # Feed-forward
         hidden_states = self.layer[-1](hidden_states)
 
-        return hidden_states
+        return hidden_states, position_bias
 
 
 class T5Stack(nn.Module):
@@ -579,19 +598,18 @@ class T5ForConditionalGeneration(nn.Module):
         # Language modeling head
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-    def forward(self, input_ids, decoder_input_ids, labels=None):
+    def forward(self, input_ids, decoder_input_ids=None, labels=None):
         # Encoding
         encoder_outputs = self.encoder(input_ids=input_ids)
 
         # Decoding
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
-            encoder_hidden_states=encoder_outputs[0],
+            encoder_hidden_states=encoder_outputs,
         )
 
         # Compute logits
-        sequence_output = decoder_outputs[0]
-        lm_logits = self.lm_head(sequence_output)
+        lm_logits = self.lm_head(decoder_outputs)
 
         # Compute loss (if labels are provided)
         loss = None
@@ -612,7 +630,8 @@ def main():
 
     print(f"Using device: {device}")
 
-    model = T5ForConditionalGeneration.from_pretrained("Salesforce/codet5-base")
+    config = T5Config()
+    model = T5ForConditionalGeneration(config)
     model = model.to(device)
 
     tokenizer = RobertaTokenizer.from_pretrained("Salesforce/codet5-base")
@@ -628,10 +647,12 @@ def main():
 
         for step, batch in enumerate(progress_bar):
             input_ids = batch[0].to(device)
-            labels = batch[1].to(device)
+            decoder_input_ids = batch[1].to(device)
+            labels = batch[2].to(device)
 
-            outputs = model(input_ids=input_ids, labels=labels)
-            loss = outputs.loss
+            loss, lm_logits = model(
+                input_ids=input_ids, decoder_input_ids=decoder_input_ids, labels=labels
+            )
 
             # Backward pass
             loss.backward()
