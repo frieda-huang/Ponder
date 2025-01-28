@@ -116,6 +116,9 @@ def preprocess_training_data(tokenizer: RobertaTokenizer) -> TensorDataset:
     all_source_ids = torch.tensor([f.source_ids for f in features], dtype=torch.long)
     all_target_ids = torch.tensor([f.target_ids for f in features], dtype=torch.long)
 
+    all_source_mask = (all_source_ids != tokenizer.pad_token_id).long()
+    all_target_mask = (all_target_ids != tokenizer.pad_token_id).long()
+
     assert all_source_ids.shape == (len(examples), max_source_length)  # (30,000, 256)
     assert all_target_ids.shape == (len(examples), max_target_length)  # (30,000, 128)
 
@@ -127,7 +130,9 @@ def preprocess_training_data(tokenizer: RobertaTokenizer) -> TensorDataset:
         if eos_pos.numel() > 0:
             labels[i, eos_pos[0] + 1 :] = -100  # Mask padding after EOS
 
-    return TensorDataset(all_source_ids, all_target_ids, labels)
+    return TensorDataset(
+        all_source_ids, all_source_mask, all_target_ids, all_target_mask, labels
+    )
 
 
 # T5 architecture configuration
@@ -281,6 +286,10 @@ class T5Attention(nn.Module):
         key_value_states=None,
         position_bias=None,
     ):
+        if attention_mask is not None and attention_mask.dim() == 2:
+            # e.g. [batch_size, seq_len] -> [batch_size, 1, 1, seq_len]
+            attention_mask = attention_mask[:, None, None, :]
+
         # hidden_states: [batch_size, seq_len, d_model]
         batch_size, seq_len = hidden_states.shape[:2]
         is_cross_attention = key_value_states is not None
@@ -598,7 +607,14 @@ class T5ForConditionalGeneration(nn.Module):
         # Language modeling head
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-    def forward(self, input_ids, decoder_input_ids=None, labels=None):
+    def forward(
+        self,
+        input_ids,
+        attention_mask=None,
+        decoder_input_ids=None,
+        decoder_attention_mask=None,
+        labels=None,
+    ):
         # Encoding
         encoder_outputs = self.encoder(input_ids=input_ids)
 
@@ -606,6 +622,8 @@ class T5ForConditionalGeneration(nn.Module):
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
             encoder_hidden_states=encoder_outputs,
+            attention_mask=decoder_attention_mask,
+            encoder_attention_mask=attention_mask,
         )
 
         # Compute logits
@@ -647,11 +665,17 @@ def main():
 
         for step, batch in enumerate(progress_bar):
             input_ids = batch[0].to(device)
-            decoder_input_ids = batch[1].to(device)
-            labels = batch[2].to(device)
+            attention_mask = batch[1].to(device)
+            decoder_input_ids = batch[2].to(device)
+            decoder_attention_mask = batch[3].to(device)
+            labels = batch[4].to(device)
 
             loss, lm_logits = model(
-                input_ids=input_ids, decoder_input_ids=decoder_input_ids, labels=labels
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
+                labels=labels,
             )
 
             # Backward pass
