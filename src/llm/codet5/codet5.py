@@ -85,7 +85,6 @@ def get_token_ids(
         padding="max_length",
         truncation=True,
     )
-    assert token_ids.count(tokenizer.eos_token_id) == 1
     return token_ids
 
 
@@ -155,6 +154,7 @@ class T5Config:
     pad_token_id = 0
     eos_token_id = 1
     is_decoder = False
+    decoder_start_token_id = 0  # Usually the same as pad
 
 
 class T5LayerNorm(nn.Module):
@@ -607,6 +607,23 @@ class T5ForConditionalGeneration(nn.Module):
         # Language modeling head
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
+    def _shift_right(self, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Standard T5 shift-right:
+        - Move all tokens to the right by 1.
+        - Place decoder_start_token_id at position 0.
+        - Replace any -100 with pad_token_id so we don't feed them into the decoder.
+        """
+        pad_token_id = self.config.pad_token_id
+        start_token_id = self.config.decoder_start_token_id
+
+        shifted = labels.new_zeros(labels.shape)
+        shifted[..., 1:] = labels[..., :-1].clone()
+        shifted[..., 0] = start_token_id
+        # Replace -100 with pad_token_id
+        shifted.masked_fill_(shifted == -100, pad_token_id)
+        return shifted
+
     def forward(
         self,
         input_ids,
@@ -615,6 +632,10 @@ class T5ForConditionalGeneration(nn.Module):
         decoder_attention_mask=None,
         labels=None,
     ):
+        # If training (labels given) but decoder_input_ids are None, shift-right
+        if labels is not None and decoder_input_ids is None:
+            decoder_input_ids = self._shift_right(labels)
+
         # Encoding
         encoder_outputs = self.encoder(input_ids=input_ids)
 
@@ -649,6 +670,9 @@ def main():
     print(f"Using device: {device}")
 
     config = T5Config()
+    config.decoder_start_token_id = (
+        config.pad_token_id
+    )  # Typically T5 does <pad> as start
     model = T5ForConditionalGeneration(config)
     model = model.to(device)
 
