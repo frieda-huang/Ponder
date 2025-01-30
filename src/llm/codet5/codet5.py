@@ -194,7 +194,9 @@ class T5Attention(nn.Module):
         super().__init__()
         self.n_heads = config.num_heads
         self.is_decoder = config.is_decoder
-        self.key_value_proj_dim = config.d_kv  # Dimension size for each attention head
+        self.key_value_proj_dim = (
+            config.d_model // config.num_heads
+        )  # Dimension size for each attention head
         self.d_model = config.d_model  # Embedding dimension
         self.inner_dim = (
             self.n_heads * self.key_value_proj_dim
@@ -396,7 +398,7 @@ class T5LayerCrossAttention(nn.Module):
         attention_output, position_bias = self.encoder_decoder_attn(
             normed_hidden_states,
             key_value_states=key_value_states,
-            attention_mask=attention_mask,
+            attention_mask=encoder_attention_mask,
             position_bias=position_bias,
         )
         hidden_states = hidden_states + self.dropout(attention_output)
@@ -589,6 +591,7 @@ class T5Model(PreTrainedModel):
 class T5ForConditionalGeneration(nn.Module):
     def __init__(self, config: T5Config):
         super().__init__()
+        self.config = config
         self.model_dim = config.d_model
 
         # Shared embedding layer for encoder and decoder
@@ -658,6 +661,258 @@ class T5ForConditionalGeneration(nn.Module):
 
         return (loss, lm_logits) if loss is not None else lm_logits
 
+    def generate(
+        self,
+        input_ids,
+        attention_mask=None,
+        max_length=128,
+        num_beams=4,
+        temperature=1.0,
+        pad_token_id=None,
+        eos_token_id=None,
+        early_stopping=True,
+    ):
+        """Generate text using beam search decoding."""
+        batch_size = input_ids.shape[0]
+        device = input_ids.device
+
+        # Get encoder outputs first
+        encoder_outputs = self.encoder(
+            input_ids=input_ids, attention_mask=attention_mask
+        )
+
+        # Initialize beam state
+        beam_scorer = BeamSearchScorer(
+            batch_size=batch_size,
+            max_length=max_length,
+            num_beams=num_beams,
+            device=device,
+            pad_token_id=(
+                pad_token_id if pad_token_id is not None else self.config.pad_token_id
+            ),
+            eos_token_id=(
+                eos_token_id if eos_token_id is not None else self.config.eos_token_id
+            ),
+        )
+
+        # Expand encoder outputs for beam search
+        expanded_return_idx = (
+            torch.arange(batch_size).view(-1, 1).repeat(1, num_beams).view(-1)
+        ).to(device)
+        encoder_outputs = encoder_outputs.index_select(0, expanded_return_idx)
+
+        # Expand attention mask for beam search
+        if attention_mask is not None:
+            expanded_attention_mask = attention_mask.index_select(
+                0, expanded_return_idx
+            )
+        else:
+            expanded_attention_mask = None
+
+        # Initialize decoder input ids
+        decoder_input_ids = torch.full(
+            (batch_size * num_beams, 1),
+            self.config.decoder_start_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+
+        # Initialize scores tensor
+        beam_scores = torch.zeros(
+            (batch_size, num_beams), dtype=torch.float, device=device
+        )
+        beam_scores[:, 1:] = float(
+            "-inf"
+        )  # Initialize all beams except first to large negative value
+        beam_scores = beam_scores.view(-1)  # shape: (batch_size * num_beams,)
+
+        for step in range(max_length):
+            # Get decoder outputs
+            decoder_outputs = self.decoder(
+                input_ids=decoder_input_ids,
+                encoder_hidden_states=encoder_outputs,
+                encoder_attention_mask=expanded_attention_mask,
+            )
+
+            # Get next token logits
+            next_token_logits = self.lm_head(decoder_outputs)[:, -1, :]
+
+            # Apply temperature
+            if temperature != 1.0:
+                next_token_logits = next_token_logits / temperature
+
+            # Calculate log probabilities
+            next_token_scores = F.log_softmax(next_token_logits, dim=-1)
+
+            # Add beam scores to token scores
+            next_token_scores = next_token_scores + beam_scores[:, None]
+
+            # Reshape scores for beam search
+            vocab_size = next_token_scores.shape[-1]
+            next_token_scores = next_token_scores.view(
+                batch_size, num_beams * vocab_size
+            )
+
+            # Get next tokens and their scores
+            next_scores, next_tokens = torch.topk(
+                next_token_scores, 2 * num_beams, dim=1, largest=True, sorted=True
+            )
+
+            next_beam_indices = torch.div(
+                next_tokens, vocab_size, rounding_mode="floor"
+            )
+            next_tokens = next_tokens % vocab_size
+
+            # Reorder batch dimensions
+            beam_outputs = beam_scorer.process(
+                decoder_input_ids,
+                next_scores,
+                next_tokens,
+                next_beam_indices,
+                pad_token_id=pad_token_id,
+                eos_token_id=eos_token_id,
+            )
+
+            beam_scores = beam_outputs["next_beam_scores"]
+            beam_next_tokens = beam_outputs["next_beam_tokens"]
+            beam_idx = beam_outputs["next_beam_indices"]
+
+            decoder_input_ids = torch.cat(
+                [decoder_input_ids[beam_idx], beam_next_tokens.unsqueeze(-1)], dim=-1
+            )
+
+            if beam_scorer.is_done:
+                break
+
+        # Finalize beam search
+        return beam_scorer.finalize(
+            decoder_input_ids,
+            beam_scores,
+            next_tokens,
+            next_beam_indices,
+            pad_token_id=pad_token_id,
+            eos_token_id=eos_token_id,
+        )
+
+
+class BeamSearchScorer:
+    """A refined beam search scorer that handles batch processing properly."""
+
+    def __init__(
+        self,
+        batch_size,
+        max_length,
+        num_beams,
+        device,
+        pad_token_id=None,
+        eos_token_id=None,
+    ):
+        self.batch_size = batch_size
+        self.max_length = max_length
+        self.num_beams = num_beams
+        self.device = device
+        self.pad_token_id = pad_token_id
+        self.eos_token_id = eos_token_id
+
+        # Track generated sequences and scores for each batch
+        self.saved_sequences = [[] for _ in range(batch_size)]
+        self.saved_scores = [[] for _ in range(batch_size)]
+
+        self.is_done = False
+        self._done_batches = [False] * batch_size
+
+    def process(
+        self,
+        input_ids: torch.LongTensor,
+        next_scores: torch.FloatTensor,
+        next_tokens: torch.LongTensor,
+        next_indices: torch.LongTensor,
+        pad_token_id: int = None,
+        eos_token_id: int = None,
+    ) -> dict:
+        cur_len = input_ids.shape[-1]
+        batch_size = len(self._done_batches)
+
+        next_beam_scores = torch.zeros(
+            (batch_size, self.num_beams),
+            dtype=next_scores.dtype,
+            device=next_scores.device,
+        )
+        next_beam_tokens = torch.zeros(
+            (batch_size, self.num_beams),
+            dtype=next_tokens.dtype,
+            device=next_tokens.device,
+        )
+        next_beam_indices = torch.zeros(
+            (batch_size, self.num_beams),
+            dtype=next_indices.dtype,
+            device=next_indices.device,
+        )
+
+        for batch_idx in range(batch_size):
+            if self._done_batches[batch_idx]:
+                continue
+
+            beam_idx = batch_idx * self.num_beams
+            next_score = next_scores[batch_idx]
+            next_token = next_tokens[batch_idx]
+            next_index = next_indices[batch_idx]
+
+            # Update next beam content
+            next_beam_scores[batch_idx] = next_score[: self.num_beams]
+            next_beam_tokens[batch_idx] = next_token[: self.num_beams]
+            next_beam_indices[batch_idx] = next_index[: self.num_beams]
+
+            # Check if batch is done
+            if eos_token_id is not None:
+                if (next_token[: self.num_beams] == eos_token_id).any():
+                    self._done_batches[batch_idx] = True
+
+        self.is_done = all(self._done_batches)
+
+        return {
+            "next_beam_scores": next_beam_scores.view(-1),
+            "next_beam_tokens": next_beam_tokens.view(-1),
+            "next_beam_indices": next_beam_indices.view(-1),
+        }
+
+    def finalize(
+        self,
+        input_ids: torch.LongTensor,
+        final_beam_scores: torch.FloatTensor,
+        final_beam_tokens: torch.LongTensor,
+        final_beam_indices: torch.LongTensor,
+        pad_token_id: int = None,
+        eos_token_id: int = None,
+    ) -> torch.LongTensor:
+        batch_size = len(self._done_batches)
+
+        # Finalize all open beam hypotheses and add to generated hypotheses
+        for batch_idx in range(batch_size):
+            if self._done_batches[batch_idx]:
+                continue
+
+            # All done so add remaining beams
+            for beam_id in range(self.num_beams):
+                batch_beam_idx = batch_idx * self.num_beams + beam_id
+                self.saved_sequences[batch_idx].append(input_ids[batch_beam_idx])
+                self.saved_scores[batch_idx].append(final_beam_scores[batch_beam_idx])
+
+        # Select best hypotheses
+        output_sequences = []
+        for batch_idx, (sequences, scores) in enumerate(
+            zip(self.saved_sequences, self.saved_scores)
+        ):
+            if not sequences:
+                # If no sequences were saved for this batch, use the input_ids corresponding to the first beam
+                output_sequences.append(input_ids[batch_idx * self.num_beams])
+            else:
+                # Select the sequence with the highest score
+                best_score_idx = torch.tensor(scores).argmax()
+                output_sequences.append(sequences[best_score_idx])
+
+        return torch.stack(output_sequences)
+
 
 def main():
     if torch.backends.mps.is_available():
@@ -715,6 +970,17 @@ def main():
             # Print progress
             if step % 100 == 0:
                 print(f"Epoch: {epoch}, Step: {step}, Loss: {loss.item():.4f}")
+
+    # Save final model after training completes
+    final_model_path = "codet5_model.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": config,
+        },
+        final_model_path,
+    )
+    print(f"Saved final model to {final_model_path}")
 
 
 if __name__ == "__main__":
